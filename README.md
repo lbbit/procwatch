@@ -149,6 +149,13 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
+## 🔄 Refresh behavior
+
+- 实时状态页：按采样周期自动刷新
+- 历史查询页：进入该页时自动刷新一次
+- 历史查询页：支持点击 `刷新历史数据` 手动刷新
+- 历史查询页：查看旧点位时不会自动跳回最新点
+
 ## 📚 Usage guide
 
 1. 打开 ProcWatch

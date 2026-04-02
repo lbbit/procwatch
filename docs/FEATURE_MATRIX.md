@@ -8,6 +8,7 @@
 | SQLite 历史存储 | Implemented | 轻量本地存储 |
 | 历史图表 | Implemented | Qt Charts |
 | 历史总览点击查看对应时间点进程 | Implemented | 图表点击回查快照 |
+| 历史页保留已选点位 | Implemented | 刷新后不强制跳回最新点 |
 | 实时状态/历史查询/设置 Tab 分区 | Implemented | 降低页面复杂度 |
 | 美观桌面界面 | Implemented | 深色现代风格 |
 | JSON 配置导出/导入 | Implemented | Pydantic |

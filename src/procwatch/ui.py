@@ -174,6 +174,8 @@ class MainWindow(QMainWindow):
         self.current_history: list[HistoryPoint] = []
         self.worker: SamplingWorker | None = None
         self._ui_busy = False
+        self.selected_sample_id: int | None = None
+        self.last_active_tab_index = 0
 
         self.setWindowTitle("ProcWatch")
         if not self.app_icon.isNull():
@@ -182,8 +184,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_QSS)
         self._build_ui()
         self._build_tray()
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.request_refresh)
+        self.timer.timeout.connect(self.on_timer_tick)
         self.apply_settings_to_timer()
         self.request_refresh()
 
@@ -212,6 +215,16 @@ class MainWindow(QMainWindow):
         cards.addWidget(self.mem_card, 0, 1)
         cards.addWidget(self.samples_card, 0, 2)
         layout.addLayout(cards)
+
+        top_actions = QHBoxLayout()
+        self.refresh_button = QPushButton("立即刷新数据")
+        self.refresh_button.clicked.connect(self.request_refresh)
+        self.refresh_status_label = QLabel("状态：等待首次采样")
+        self.refresh_status_label.setProperty("muted", True)
+        top_actions.addWidget(self.refresh_button)
+        top_actions.addWidget(self.refresh_status_label)
+        top_actions.addStretch(1)
+        layout.addLayout(top_actions)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs, 1)
@@ -301,6 +314,16 @@ class MainWindow(QMainWindow):
     def _build_history_tab(self) -> None:
         layout = QVBoxLayout(self.history_tab)
         layout.setSpacing(18)
+
+        history_header = QHBoxLayout()
+        self.history_refresh_button = QPushButton("刷新历史数据")
+        self.history_refresh_button.clicked.connect(self.request_refresh)
+        self.history_mode_label = QLabel("提示：点击图表定位时间点；不会再自动跳回最新点。")
+        self.history_mode_label.setProperty("muted", True)
+        history_header.addWidget(self.history_refresh_button)
+        history_header.addWidget(self.history_mode_label)
+        history_header.addStretch(1)
+        layout.addLayout(history_header)
 
         history_chart_group = QGroupBox("历史总览（点击图表定位时间点）")
         history_chart_layout = QVBoxLayout(history_chart_group)
@@ -414,10 +437,10 @@ class MainWindow(QMainWindow):
         notes_group = QGroupBox("优化说明")
         notes_layout = QVBoxLayout(notes_group)
         for text in [
+            "• 系统 CPU 现在使用短采样窗口（0.15s）计算，避免长期出现 0%。",
             "• 已将采样移到后台线程，避免界面每 2 秒卡顿。",
-            "• 历史页支持点击图表时间点查看当时 CPU/Memory Top 进程。",
-            "• 进程表格支持鼠标选择与复制，便于复制 PID / 进程名。",
-            "• 已过滤 System Idle / Idle 等噪声进程，并把 CPU 百分比按逻辑 CPU 数归一化。",
+            "• 历史页支持手动刷新，不会在查看旧点时自动跳回最新点。",
+            "• 切换到历史页时会自动刷新一次最新数据。",
         ]:
             label = QLabel(text)
             label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -483,10 +506,24 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentWidget(self.settings_tab)
         self.show_from_tray()
 
+    def on_timer_tick(self) -> None:
+        if self.tabs.currentWidget() == self.realtime_tab:
+            self.request_refresh()
+
+    def on_tab_changed(self, index: int) -> None:
+        previous_tab = self.tabs.widget(self.last_active_tab_index)
+        current_tab = self.tabs.widget(index)
+        self.last_active_tab_index = index
+        if current_tab == self.history_tab and previous_tab != self.history_tab:
+            self.request_refresh()
+
     def request_refresh(self) -> None:
         if self._ui_busy:
             return
         self._ui_busy = True
+        self.refresh_button.setEnabled(False)
+        self.history_refresh_button.setEnabled(False)
+        self.refresh_status_label.setText("状态：后台刷新中...")
         self.worker = SamplingWorker(self.monitor_service)
         self.worker.snapshot_ready.connect(self.on_snapshot_ready)
         self.worker.error_raised.connect(self.on_worker_error)
@@ -496,8 +533,11 @@ class MainWindow(QMainWindow):
     def _clear_worker_state(self) -> None:
         self._ui_busy = False
         self.worker = None
+        self.refresh_button.setEnabled(True)
+        self.history_refresh_button.setEnabled(True)
 
     def on_worker_error(self, message: str) -> None:
+        self.refresh_status_label.setText(f"状态：刷新失败 - {message}")
         self.selected_summary_label.setText(f"后台采样失败：{message}")
 
     def apply_settings_to_timer(self) -> None:
@@ -515,6 +555,9 @@ class MainWindow(QMainWindow):
         self.cpu_card.set_value(f"{snapshot.cpu_percent:.1f}%")
         self.mem_card.set_value(f"{snapshot.memory_percent:.1f}%")
         self.samples_card.set_value(str(len(history)))
+        self.refresh_status_label.setText(
+            f"状态：最近刷新 {snapshot.timestamp.astimezone().strftime('%H:%M:%S')}"
+        )
         self.current_time_label.setText(
             f"当前样本时间：{snapshot.timestamp.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -528,8 +571,13 @@ class MainWindow(QMainWindow):
         self._fill_table(self.mem_table, snapshot.top_memory_processes)
         self._update_realtime_chart(history[-120:])
         self._update_history_chart(history)
-        if history:
+        if self.selected_sample_id is None and history:
             self.load_sample_details(history[-1].sample_id)
+        elif self.selected_sample_id is not None:
+            if any(point.sample_id == self.selected_sample_id for point in history):
+                self.load_sample_details(self.selected_sample_id)
+            elif history:
+                self.load_sample_details(history[-1].sample_id)
 
     def _update_realtime_chart(self, history: list[HistoryPoint]) -> None:
         self.rt_cpu_series.clear()
@@ -552,6 +600,7 @@ class MainWindow(QMainWindow):
         self.history_axis_x.setRange(0, max(1, len(history) - 1))
 
     def load_sample_details(self, sample_id: int) -> None:
+        self.selected_sample_id = sample_id
         history_index = next(
             (idx for idx, point in enumerate(self.current_history) if point.sample_id == sample_id),
             None,

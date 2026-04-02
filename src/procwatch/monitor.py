@@ -15,7 +15,6 @@ SKIP_PROCESS_NAMES = {
 
 class ProcessSampler:
     def __init__(self) -> None:
-        self._last_system_cpu_times: dict[int, float] = {}
         self._prime_cpu_counters()
 
     def _prime_cpu_counters(self) -> None:
@@ -66,10 +65,11 @@ class SystemSampler:
 
     def sample(self, top_n_cpu: int, top_n_memory: int) -> SystemSnapshot:
         virtual_memory = psutil.virtual_memory()
+        total_cpu_percent = psutil.cpu_percent(interval=0.15)
         top_cpu, top_memory = self.process_sampler.sample(top_n_cpu, top_n_memory)
         return SystemSnapshot(
             timestamp=datetime.now(UTC),
-            cpu_percent=psutil.cpu_percent(interval=None),
+            cpu_percent=round(total_cpu_percent, 1),
             memory_percent=float(virtual_memory.percent),
             total_memory_mb=round(virtual_memory.total / 1024 / 1024),
             used_memory_mb=round(
