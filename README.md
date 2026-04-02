@@ -115,6 +115,15 @@ pytest -q
 ruff check .
 ```
 
+## 🎨 App icon
+
+打包使用仓库内置图标：
+
+- `assets/app_icon.png`
+- `assets/app_icon.ico`
+
+当前图标已替换为用户提供的芯片图标。
+
 ## 🛠️ Build portable EXE
 
 ### Local build

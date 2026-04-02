@@ -27,3 +27,17 @@ pip install -e .[dev]
 - Related Files: pyproject.toml, .github/workflows/ci.yml
 
 ---
+## [ERR-20260402-002] qstyle-standard-icon-compat
+
+**Logged**: 2026-04-02T08:17:00Z
+**Priority**: high
+**Status**: fixed
+**Area**: ui
+
+### Summary
+`QStyle.StandardPixmap` 里并非所有平台/Qt 版本都存在 `SP_ComputerIcon`，直接访问会导致 Windows 打包后启动崩溃。
+
+### Fix
+改为优先加载项目内置应用图标；若失败，再回退到更稳定的标准图标如 `SP_DesktopIcon`。
+
+---

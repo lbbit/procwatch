@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QPainter
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QStyle,
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
@@ -64,6 +65,18 @@ QHeaderView::section {
 """
 
 
+def resolve_asset_path(name: str) -> Path:
+    base_dir = Path(__file__).resolve().parents[2]
+    return base_dir / "assets" / name
+
+
+def load_app_icon() -> QIcon:
+    icon_path = resolve_asset_path("app_icon.png")
+    if icon_path.exists():
+        return QIcon(str(icon_path))
+    return QIcon()
+
+
 class MetricCard(QFrame):
     def __init__(self, title: str, accent: str) -> None:
         super().__init__()
@@ -86,7 +99,10 @@ class MainWindow(QMainWindow):
         self.context = context
         self.monitor_service = MonitorService(context)
         self.autostart_service = AutostartService()
+        self.app_icon = load_app_icon()
         self.setWindowTitle("ProcWatch")
+        if not self.app_icon.isNull():
+            self.setWindowIcon(self.app_icon)
         self.resize(1360, 860)
         self.setStyleSheet(DARK_QSS)
         self._build_ui()
@@ -223,7 +239,10 @@ class MainWindow(QMainWindow):
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
-        self.tray.setIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
+        tray_icon = self.app_icon
+        if tray_icon.isNull():
+            tray_icon = self.style().standardIcon(QStyle.SP_DesktopIcon)
+        self.tray.setIcon(tray_icon)
         menu = self.menuBar().addMenu("托盘")
         show_action = QAction("显示窗口", self)
         show_action.triggered.connect(self.showNormal)
@@ -355,6 +374,9 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        app.setWindowIcon(app_icon)
     base_dir = Path(__file__).resolve().parents[2]
     from procwatch.services import create_app_context
 

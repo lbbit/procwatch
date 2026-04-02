@@ -10,6 +10,8 @@ DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_NAME = "ProcWatch"
 ZIP_NAME = "ProcWatch-win-x64-portable.zip"
+ICON_ICO = ROOT / "assets" / "app_icon.ico"
+ICON_PNG = ROOT / "assets" / "app_icon.png"
 
 
 def sha256_of(path: Path) -> str:
@@ -25,22 +27,25 @@ def main() -> None:
         shutil.rmtree(DIST)
     if BUILD.exists():
         shutil.rmtree(BUILD)
-    subprocess.run(
-        [
-            "pyinstaller",
-            "--noconfirm",
-            "--clean",
-            "--name",
-            APP_NAME,
-            "--windowed",
-            "--onedir",
-            "--paths",
-            str(ROOT / "src"),
-            str(ROOT / "src" / "procwatch" / "main.py"),
-        ],
-        check=True,
-        cwd=ROOT,
-    )
+
+    command = [
+        "pyinstaller",
+        "--noconfirm",
+        "--clean",
+        "--name",
+        APP_NAME,
+        "--windowed",
+        "--onedir",
+        "--paths",
+        str(ROOT / "src"),
+        "--add-data",
+        f"{ICON_PNG}{';' if shutil.which('cmd') else ':'}assets",
+    ]
+    if ICON_ICO.exists():
+        command.extend(["--icon", str(ICON_ICO)])
+    command.append(str(ROOT / "src" / "procwatch" / "main.py"))
+
+    subprocess.run(command, check=True, cwd=ROOT)
     package_dir = DIST / APP_NAME
     archive_base = DIST / "ProcWatch-win-x64-portable"
     archive_path = Path(shutil.make_archive(str(archive_base), "zip", package_dir))
