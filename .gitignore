@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+ruff_cache/
+htmlcov/
+.coverage*
+
+# Build & packaging
+build/
+dist/
+*.spec
+*.egg-info/
+*.exe
+*.zip
+
+# Qt / PySide
+*.qmlc
+*.jsc
+*.rcc
+
+# Runtime data
+*.db
+*.sqlite
+*.sqlite3
+*.log
+runtime/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
