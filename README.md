@@ -80,9 +80,11 @@ ProcWatch
 | 记录内存 Top N 进程 | ✅ basic implementation |
 | SQLite 历史存储 | ✅ basic implementation |
 | 历史趋势图 | ✅ basic implementation |
-| 美观 Qt 桌面界面 | ✅ first version |
+| 实时状态 / 历史查询 / 设置三标签页 | ✅ implemented |
+| 历史总览点击查看当时进程快照 | ✅ implemented |
+| 美观 Qt 桌面界面 | ✅ improved |
 | JSON / INI 配置导入导出 | ✅ basic implementation |
-| 托盘后台运行 | ✅ first version |
+| 托盘后台运行 | ✅ improved |
 | Windows 开机自启动 | ✅ first version |
 | 自动 Release 构建绿色版 | ✅ workflow ready |
 

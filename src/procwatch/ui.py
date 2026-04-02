@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCharts import QChart, QChartView, QLineSeries, QValueAxis
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter
+from PySide6.QtCharts import QChart, QChartView, QLineSeries, QScatterSeries, QValueAxis
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QIcon, QPainter
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QDoubleSpinBox,
@@ -16,8 +18,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -25,20 +29,33 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from procwatch.autostart import AutostartService
+from procwatch.database import HistoryPoint
+from procwatch.models import ProcessMetric, SystemSnapshot
 from procwatch.services import AppContext, MonitorService
 
 DARK_QSS = """
 QWidget { background: #0f172a; color: #e2e8f0; font-family: 'Segoe UI'; }
-QFrame[card='true'], QGroupBox {
+QTabWidget::pane, QFrame[card='true'], QGroupBox {
   background: #111827;
   border: 1px solid #243041;
   border-radius: 14px;
 }
+QTabBar::tab {
+  background: #172033;
+  color: #cbd5e1;
+  border: 1px solid #243041;
+  padding: 10px 18px;
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+  margin-right: 4px;
+}
+QTabBar::tab:selected { background: #2563eb; color: white; }
 QGroupBox { margin-top: 12px; padding-top: 12px; font-weight: 600; }
 QPushButton {
   background: #2563eb;
@@ -55,6 +72,7 @@ QTableWidget {
   gridline-color: #243041;
   border: 1px solid #243041;
   border-radius: 10px;
+  selection-background-color: #1d4ed8;
 }
 QHeaderView::section {
   background: #172033;
@@ -62,18 +80,32 @@ QHeaderView::section {
   border: none;
   padding: 8px;
 }
+QLabel[muted='true'] { color:#94a3b8; }
 """
 
 
 def resolve_asset_path(name: str) -> Path:
+    if getattr(sys, "frozen", False):
+        base_dir = Path(sys.executable).resolve().parent
+        candidate = base_dir / "assets" / name
+        if candidate.exists():
+            return candidate
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate = Path(meipass) / "assets" / name
+            if candidate.exists():
+                return candidate
     base_dir = Path(__file__).resolve().parents[2]
     return base_dir / "assets" / name
 
 
 def load_app_icon() -> QIcon:
-    icon_path = resolve_asset_path("app_icon.png")
-    if icon_path.exists():
-        return QIcon(str(icon_path))
+    for name in ["app_icon.ico", "app_icon.png"]:
+        icon_path = resolve_asset_path(name)
+        if icon_path.exists():
+            icon = QIcon(str(icon_path))
+            if not icon.isNull():
+                return icon
     return QIcon()
 
 
@@ -83,7 +115,8 @@ class MetricCard(QFrame):
         self.setProperty("card", True)
         layout = QVBoxLayout(self)
         self.title = QLabel(title)
-        self.title.setStyleSheet("color:#94a3b8;font-size:13px;")
+        self.title.setProperty("muted", True)
+        self.title.setStyleSheet("font-size:13px;")
         self.value = QLabel("--")
         self.value.setStyleSheet(f"font-size:28px;font-weight:700;color:{accent};")
         layout.addWidget(self.title)
@@ -93,6 +126,43 @@ class MetricCard(QFrame):
         self.value.setText(value)
 
 
+class SamplingWorker(QThread):
+    snapshot_ready = Signal(object, object, object)
+    error_raised = Signal(str)
+
+    def __init__(self, monitor_service: MonitorService) -> None:
+        super().__init__()
+        self.monitor_service = monitor_service
+
+    def run(self) -> None:
+        try:
+            snapshot = self.monitor_service.collect_once()
+            history = self.monitor_service.history_points(limit=2000)
+            self.snapshot_ready.emit(snapshot, history, None)
+        except Exception as exc:  # noqa: BLE001
+            self.error_raised.emit(str(exc))
+
+
+class HistoryChartView(QChartView):
+    point_selected = Signal(int)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._sample_ids: list[int] = []
+
+    def set_sample_ids(self, sample_ids: list[int]) -> None:
+        self._sample_ids = sample_ids
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if not self._sample_ids:
+            return super().mousePressEvent(event)
+        value = self.chart().mapToValue(event.position())
+        index = int(round(value.x()))
+        index = max(0, min(index, len(self._sample_ids) - 1))
+        self.point_selected.emit(self._sample_ids[index])
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, context: AppContext) -> None:
         super().__init__()
@@ -100,17 +170,22 @@ class MainWindow(QMainWindow):
         self.monitor_service = MonitorService(context)
         self.autostart_service = AutostartService()
         self.app_icon = load_app_icon()
+        self.current_snapshot: SystemSnapshot | None = None
+        self.current_history: list[HistoryPoint] = []
+        self.worker: SamplingWorker | None = None
+        self._ui_busy = False
+
         self.setWindowTitle("ProcWatch")
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
-        self.resize(1360, 860)
+        self.resize(1460, 920)
         self.setStyleSheet(DARK_QSS)
         self._build_ui()
         self._build_tray()
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_once)
+        self.timer.timeout.connect(self.request_refresh)
         self.apply_settings_to_timer()
-        self.refresh_once()
+        self.request_refresh()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -121,8 +196,11 @@ class MainWindow(QMainWindow):
 
         title = QLabel("ProcWatch · 瞬时卡顿捕手")
         title.setStyleSheet("font-size:30px;font-weight:800;")
-        subtitle = QLabel("持续记录系统 CPU/内存与 Top 进程，让短时卡顿也有证据可查。")
-        subtitle.setStyleSheet("color:#94a3b8;font-size:14px;")
+        subtitle = QLabel(
+            "持续记录系统 CPU/内存与 Top 进程，实时轻量监控，支持按时间点回看卡顿现场。"
+        )
+        subtitle.setProperty("muted", True)
+        subtitle.setStyleSheet("font-size:14px;")
         layout.addWidget(title)
         layout.addWidget(subtitle)
 
@@ -135,57 +213,163 @@ class MainWindow(QMainWindow):
         cards.addWidget(self.samples_card, 0, 2)
         layout.addLayout(cards)
 
-        center = QHBoxLayout()
-        center.setSpacing(18)
-        layout.addLayout(center, 1)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs, 1)
 
-        left_panel = QVBoxLayout()
-        right_panel = QVBoxLayout()
-        center.addLayout(left_panel, 3)
-        center.addLayout(right_panel, 2)
+        self.realtime_tab = QWidget()
+        self.history_tab = QWidget()
+        self.settings_tab = QWidget()
+        self.tabs.addTab(self.realtime_tab, "实时状态")
+        self.tabs.addTab(self.history_tab, "历史查询")
+        self.tabs.addTab(self.settings_tab, "设置")
 
-        self.chart = QChart()
-        self.chart.setBackgroundBrush(QColor("#111827"))
-        self.chart.legend().setVisible(True)
-        self.cpu_series = QLineSeries()
-        self.cpu_series.setName("CPU %")
-        self.mem_series = QLineSeries()
-        self.mem_series.setName("Memory %")
-        self.chart.addSeries(self.cpu_series)
-        self.chart.addSeries(self.mem_series)
-        self.axis_x = QValueAxis()
-        self.axis_x.setLabelFormat("%d")
-        self.axis_x.setTitleText("最近样本")
-        self.axis_y = QValueAxis()
-        self.axis_y.setRange(0, 100)
-        self.axis_y.setTitleText("Percent")
-        self.chart.addAxis(self.axis_x, Qt.AlignBottom)
-        self.chart.addAxis(self.axis_y, Qt.AlignLeft)
-        self.cpu_series.attachAxis(self.axis_x)
-        self.cpu_series.attachAxis(self.axis_y)
-        self.mem_series.attachAxis(self.axis_x)
-        self.mem_series.attachAxis(self.axis_y)
-        chart_view = QChartView(self.chart)
-        chart_view.setRenderHint(QPainter.Antialiasing)
+        self._build_realtime_tab()
+        self._build_history_tab()
+        self._build_settings_tab()
 
-        chart_group = QGroupBox("历史趋势")
+    def _build_realtime_tab(self) -> None:
+        layout = QVBoxLayout(self.realtime_tab)
+        layout.setSpacing(18)
+
+        realtime_top = QHBoxLayout()
+        layout.addLayout(realtime_top, 1)
+
+        chart_group = QGroupBox("最近趋势")
         chart_layout = QVBoxLayout(chart_group)
+        self.realtime_chart = QChart()
+        self.realtime_chart.setBackgroundBrush(QColor("#111827"))
+        self.realtime_chart.legend().setVisible(True)
+        self.rt_cpu_series = QLineSeries()
+        self.rt_cpu_series.setName("CPU %")
+        self.rt_mem_series = QLineSeries()
+        self.rt_mem_series.setName("Memory %")
+        self.realtime_chart.addSeries(self.rt_cpu_series)
+        self.realtime_chart.addSeries(self.rt_mem_series)
+        self.rt_axis_x = QValueAxis()
+        self.rt_axis_x.setLabelFormat("%d")
+        self.rt_axis_x.setTitleText("最近样本")
+        self.rt_axis_y = QValueAxis()
+        self.rt_axis_y.setRange(0, 100)
+        self.rt_axis_y.setTitleText("Percent")
+        self.realtime_chart.addAxis(self.rt_axis_x, Qt.AlignBottom)
+        self.realtime_chart.addAxis(self.rt_axis_y, Qt.AlignLeft)
+        self.rt_cpu_series.attachAxis(self.rt_axis_x)
+        self.rt_cpu_series.attachAxis(self.rt_axis_y)
+        self.rt_mem_series.attachAxis(self.rt_axis_x)
+        self.rt_mem_series.attachAxis(self.rt_axis_y)
+        chart_view = QChartView(self.realtime_chart)
+        chart_view.setRenderHint(QPainter.Antialiasing)
         chart_layout.addWidget(chart_view)
-        left_panel.addWidget(chart_group, 2)
+        realtime_top.addWidget(chart_group, 3)
 
+        status_group = QGroupBox("当前说明")
+        status_layout = QVBoxLayout(status_group)
+        self.realtime_hint = QLabel(
+            "实时状态页聚焦当前与最近样本；历史查询页可点击任意时间点查看当时的进程快照。"
+        )
+        self.realtime_hint.setWordWrap(True)
+        self.realtime_hint.setProperty("muted", True)
+        self.current_time_label = QLabel("当前样本时间：--")
+        self.current_time_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.current_cpu_label = QLabel("当前 CPU Top：--")
+        self.current_cpu_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.current_mem_label = QLabel("当前 Memory Top：--")
+        self.current_mem_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        for widget in [
+            self.realtime_hint,
+            self.current_time_label,
+            self.current_cpu_label,
+            self.current_mem_label,
+        ]:
+            status_layout.addWidget(widget)
+        status_layout.addStretch(1)
+        realtime_top.addWidget(status_group, 2)
+
+        tables_row = QHBoxLayout()
+        layout.addLayout(tables_row, 2)
         self.cpu_table = self._make_table()
+        self.mem_table = self._make_table()
         cpu_group = QGroupBox("CPU Top 进程")
         cpu_layout = QVBoxLayout(cpu_group)
         cpu_layout.addWidget(self.cpu_table)
-        left_panel.addWidget(cpu_group, 1)
-
-        self.mem_table = self._make_table()
         mem_group = QGroupBox("Memory Top 进程")
         mem_layout = QVBoxLayout(mem_group)
         mem_layout.addWidget(self.mem_table)
-        right_panel.addWidget(mem_group, 1)
+        tables_row.addWidget(cpu_group, 1)
+        tables_row.addWidget(mem_group, 1)
 
-        settings_group = QGroupBox("设置")
+    def _build_history_tab(self) -> None:
+        layout = QVBoxLayout(self.history_tab)
+        layout.setSpacing(18)
+
+        history_chart_group = QGroupBox("历史总览（点击图表定位时间点）")
+        history_chart_layout = QVBoxLayout(history_chart_group)
+        self.history_chart = QChart()
+        self.history_chart.setBackgroundBrush(QColor("#111827"))
+        self.history_chart.legend().setVisible(True)
+        self.history_cpu_series = QLineSeries()
+        self.history_cpu_series.setName("CPU %")
+        self.history_mem_series = QLineSeries()
+        self.history_mem_series.setName("Memory %")
+        self.history_selected_point = QScatterSeries()
+        self.history_selected_point.setName("Selected")
+        self.history_selected_point.setMarkerSize(12.0)
+        self.history_chart.addSeries(self.history_cpu_series)
+        self.history_chart.addSeries(self.history_mem_series)
+        self.history_chart.addSeries(self.history_selected_point)
+        self.history_axis_x = QValueAxis()
+        self.history_axis_x.setLabelFormat("%d")
+        self.history_axis_x.setTitleText("历史样本索引")
+        self.history_axis_y = QValueAxis()
+        self.history_axis_y.setRange(0, 100)
+        self.history_axis_y.setTitleText("Percent")
+        self.history_chart.addAxis(self.history_axis_x, Qt.AlignBottom)
+        self.history_chart.addAxis(self.history_axis_y, Qt.AlignLeft)
+        for series in [
+            self.history_cpu_series,
+            self.history_mem_series,
+            self.history_selected_point,
+        ]:
+            series.attachAxis(self.history_axis_x)
+            series.attachAxis(self.history_axis_y)
+        self.history_chart_view = HistoryChartView()
+        self.history_chart_view.setChart(self.history_chart)
+        self.history_chart_view.setRenderHint(QPainter.Antialiasing)
+        self.history_chart_view.point_selected.connect(self.load_sample_details)
+        history_chart_layout.addWidget(self.history_chart_view)
+        layout.addWidget(history_chart_group, 2)
+
+        detail_row = QHBoxLayout()
+        layout.addLayout(detail_row, 2)
+
+        detail_group = QGroupBox("选中时间点详情")
+        detail_layout = QVBoxLayout(detail_group)
+        self.selected_time_label = QLabel("时间点：--")
+        self.selected_time_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.selected_summary_label = QLabel("说明：点击上方历史图任意位置查看当时快照")
+        self.selected_summary_label.setWordWrap(True)
+        self.selected_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        detail_layout.addWidget(self.selected_time_label)
+        detail_layout.addWidget(self.selected_summary_label)
+        detail_layout.addStretch(1)
+        detail_row.addWidget(detail_group, 1)
+
+        self.history_cpu_table = self._make_table()
+        self.history_mem_table = self._make_table()
+        history_cpu_group = QGroupBox("该时间点 CPU Top")
+        history_cpu_layout = QVBoxLayout(history_cpu_group)
+        history_cpu_layout.addWidget(self.history_cpu_table)
+        history_mem_group = QGroupBox("该时间点 Memory Top")
+        history_mem_layout = QVBoxLayout(history_mem_group)
+        history_mem_layout.addWidget(self.history_mem_table)
+        detail_row.addWidget(history_cpu_group, 2)
+        detail_row.addWidget(history_mem_group, 2)
+
+    def _build_settings_tab(self) -> None:
+        layout = QVBoxLayout(self.settings_tab)
+        layout.setSpacing(18)
+
+        settings_group = QGroupBox("采样与行为设置")
         settings_layout = QVBoxLayout(settings_group)
         form = QFormLayout()
         self.interval_spin = QDoubleSpinBox()
@@ -214,27 +398,53 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.autostart_checkbox)
 
         button_row = QHBoxLayout()
-        save_btn = QPushButton("保存设置")
-        save_btn.clicked.connect(self.save_settings)
-        export_json_btn = QPushButton("导出 JSON")
-        export_json_btn.clicked.connect(self.export_json)
-        import_json_btn = QPushButton("导入 JSON")
-        import_json_btn.clicked.connect(self.import_json)
-        export_ini_btn = QPushButton("导出 INI")
-        export_ini_btn.clicked.connect(self.export_ini)
-        import_ini_btn = QPushButton("导入 INI")
-        import_ini_btn.clicked.connect(self.import_ini)
-        for btn in [save_btn, export_json_btn, import_json_btn, export_ini_btn, import_ini_btn]:
-            button_row.addWidget(btn)
+        for text, handler in [
+            ("保存设置", self.save_settings),
+            ("导出 JSON", self.export_json),
+            ("导入 JSON", self.import_json),
+            ("导出 INI", self.export_ini),
+            ("导入 INI", self.import_ini),
+        ]:
+            button = QPushButton(text)
+            button.clicked.connect(handler)
+            button_row.addWidget(button)
         settings_layout.addLayout(button_row)
-        right_panel.addWidget(settings_group, 1)
+        layout.addWidget(settings_group)
+
+        notes_group = QGroupBox("优化说明")
+        notes_layout = QVBoxLayout(notes_group)
+        for text in [
+            "• 已将采样移到后台线程，避免界面每 2 秒卡顿。",
+            "• 历史页支持点击图表时间点查看当时 CPU/Memory Top 进程。",
+            "• 进程表格支持鼠标选择与复制，便于复制 PID / 进程名。",
+            "• 已过滤 System Idle / Idle 等噪声进程，并把 CPU 百分比按逻辑 CPU 数归一化。",
+        ]:
+            label = QLabel(text)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            notes_layout.addWidget(label)
+        notes_layout.addStretch(1)
+        layout.addWidget(notes_group, 1)
 
     def _make_table(self) -> QTableWidget:
         table = QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(["PID", "Process", "CPU %", "Memory MB"])
         table.setAlternatingRowColors(True)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.ElideMiddle)
+        table.setSortingEnabled(False)
+        table.setContextMenuPolicy(Qt.ActionsContextMenu)
+        copy_action = QAction("复制选中行", table)
+        copy_action.triggered.connect(lambda t=table: self.copy_selected_row(t))
+        table.addAction(copy_action)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         return table
 
     def _build_tray(self) -> None:
@@ -243,45 +453,125 @@ class MainWindow(QMainWindow):
         if tray_icon.isNull():
             tray_icon = self.style().standardIcon(QStyle.SP_DesktopIcon)
         self.tray.setIcon(tray_icon)
-        menu = self.menuBar().addMenu("托盘")
-        show_action = QAction("显示窗口", self)
-        show_action.triggered.connect(self.showNormal)
-        quit_action = QAction("退出程序", self)
+
+        tray_menu = QMenu(self)
+        open_action = tray_menu.addAction("打开界面")
+        open_action.triggered.connect(self.show_from_tray)
+        settings_action = tray_menu.addAction("打开设置")
+        settings_action.triggered.connect(self.show_settings_tab)
+        tray_menu.addSeparator()
+        refresh_action = tray_menu.addAction("立即采样")
+        refresh_action.triggered.connect(self.request_refresh)
+        tray_menu.addSeparator()
+        quit_action = tray_menu.addAction("退出程序")
         quit_action.triggered.connect(QApplication.instance().quit)
-        tray_menu = menu
+
         self.tray.setContextMenu(tray_menu)
         self.tray.activated.connect(self.on_tray_activated)
-        tray_menu.addAction(show_action)
-        tray_menu.addAction(quit_action)
         self.tray.show()
 
     def on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason == QSystemTrayIcon.DoubleClick:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+        if reason in {QSystemTrayIcon.DoubleClick, QSystemTrayIcon.Trigger}:
+            self.show_from_tray()
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def show_settings_tab(self) -> None:
+        self.tabs.setCurrentWidget(self.settings_tab)
+        self.show_from_tray()
+
+    def request_refresh(self) -> None:
+        if self._ui_busy:
+            return
+        self._ui_busy = True
+        self.worker = SamplingWorker(self.monitor_service)
+        self.worker.snapshot_ready.connect(self.on_snapshot_ready)
+        self.worker.error_raised.connect(self.on_worker_error)
+        self.worker.finished.connect(self._clear_worker_state)
+        self.worker.start()
+
+    def _clear_worker_state(self) -> None:
+        self._ui_busy = False
+        self.worker = None
+
+    def on_worker_error(self, message: str) -> None:
+        self.selected_summary_label.setText(f"后台采样失败：{message}")
 
     def apply_settings_to_timer(self) -> None:
         interval_ms = int(self.context.config.monitor.sampling_interval_seconds * 1000)
         self.timer.start(interval_ms)
 
-    def refresh_once(self) -> None:
-        snapshot = self.monitor_service.collect_once()
+    def on_snapshot_ready(
+        self,
+        snapshot: SystemSnapshot,
+        history: list[HistoryPoint],
+        _placeholder: Any,
+    ) -> None:
+        self.current_snapshot = snapshot
+        self.current_history = history
         self.cpu_card.set_value(f"{snapshot.cpu_percent:.1f}%")
         self.mem_card.set_value(f"{snapshot.memory_percent:.1f}%")
-        samples = self.monitor_service.recent_samples(limit=120)
-        self.samples_card.set_value(str(len(samples)))
-        ordered = list(reversed(samples))
-        self.cpu_series.clear()
-        self.mem_series.clear()
-        for idx, sample in enumerate(ordered):
-            self.cpu_series.append(idx, sample.cpu_percent)
-            self.mem_series.append(idx, sample.memory_percent)
-        self.axis_x.setRange(0, max(1, len(ordered) - 1))
+        self.samples_card.set_value(str(len(history)))
+        self.current_time_label.setText(
+            f"当前样本时间：{snapshot.timestamp.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        self.current_cpu_label.setText(
+            "当前 CPU Top：" + self._format_process_summary(snapshot.top_cpu_processes)
+        )
+        self.current_mem_label.setText(
+            "当前 Memory Top：" + self._format_process_summary(snapshot.top_memory_processes)
+        )
         self._fill_table(self.cpu_table, snapshot.top_cpu_processes)
         self._fill_table(self.mem_table, snapshot.top_memory_processes)
+        self._update_realtime_chart(history[-120:])
+        self._update_history_chart(history)
+        if history:
+            self.load_sample_details(history[-1].sample_id)
 
-    def _fill_table(self, table: QTableWidget, rows: list) -> None:
+    def _update_realtime_chart(self, history: list[HistoryPoint]) -> None:
+        self.rt_cpu_series.clear()
+        self.rt_mem_series.clear()
+        for idx, point in enumerate(history):
+            self.rt_cpu_series.append(idx, point.cpu_percent)
+            self.rt_mem_series.append(idx, point.memory_percent)
+        self.rt_axis_x.setRange(0, max(1, len(history) - 1))
+
+    def _update_history_chart(self, history: list[HistoryPoint]) -> None:
+        self.history_cpu_series.clear()
+        self.history_mem_series.clear()
+        self.history_selected_point.clear()
+        sample_ids: list[int] = []
+        for idx, point in enumerate(history):
+            self.history_cpu_series.append(idx, point.cpu_percent)
+            self.history_mem_series.append(idx, point.memory_percent)
+            sample_ids.append(point.sample_id)
+        self.history_chart_view.set_sample_ids(sample_ids)
+        self.history_axis_x.setRange(0, max(1, len(history) - 1))
+
+    def load_sample_details(self, sample_id: int) -> None:
+        history_index = next(
+            (idx for idx, point in enumerate(self.current_history) if point.sample_id == sample_id),
+            None,
+        )
+        if history_index is not None:
+            point = self.current_history[history_index]
+            self.history_selected_point.clear()
+            self.history_selected_point.append(history_index, point.cpu_percent)
+            self.selected_time_label.setText(
+                f"时间点：{point.timestamp.astimezone().strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            self.selected_summary_label.setText(
+                f"系统 CPU {point.cpu_percent:.1f}% · 系统内存 {point.memory_percent:.1f}%"
+            )
+        cpu_rows = self.monitor_service.sample_processes(sample_id, "cpu")
+        mem_rows = self.monitor_service.sample_processes(sample_id, "memory")
+        self._fill_table(self.history_cpu_table, cpu_rows)
+        self._fill_table(self.history_mem_table, mem_rows)
+
+    def _fill_table(self, table: QTableWidget, rows: list[ProcessMetric]) -> None:
         table.setRowCount(len(rows))
         for row_index, item in enumerate(rows):
             values = [
@@ -291,7 +581,33 @@ class MainWindow(QMainWindow):
                 f"{item.memory_mb:.1f}",
             ]
             for col, value in enumerate(values):
-                table.setItem(row_index, col, QTableWidgetItem(value))
+                cell = QTableWidgetItem(value)
+                cell.setFlags(cell.flags() & ~Qt.ItemIsEditable)
+                if col in {0, 1}:
+                    cell.setToolTip(value)
+                table.setItem(row_index, col, cell)
+        table.resizeRowsToContents()
+
+    def copy_selected_row(self, table: QTableWidget) -> None:
+        row = table.currentRow()
+        if row < 0:
+            return
+        values = []
+        for col in range(table.columnCount()):
+            item = table.item(row, col)
+            values.append(item.text() if item else "")
+        QGuiApplication.clipboard().setText("\t".join(values))
+
+    def _format_process_summary(self, rows: list[ProcessMetric]) -> str:
+        if not rows:
+            return "--"
+        return "；".join(
+            (
+                f"{item.process_name} (PID {item.pid}, "
+                f"CPU {item.cpu_percent:.1f}%, MEM {item.memory_mb:.1f} MB)"
+            )
+            for item in rows[:3]
+        )
 
     def save_settings(self) -> None:
         monitor = self.context.config.monitor
@@ -374,12 +690,22 @@ class MainWindow(QMainWindow):
 
 def run() -> None:
     app = QApplication(sys.argv)
+    app.setApplicationName("ProcWatch")
+    app.setDesktopFileName("ProcWatch")
     app_icon = load_app_icon()
     if not app_icon.isNull():
         app.setWindowIcon(app_icon)
-    base_dir = Path(__file__).resolve().parents[2]
     from procwatch.services import create_app_context
 
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("lbbit.procwatch")
+        except Exception:
+            pass
+
+    base_dir = Path(__file__).resolve().parents[2]
     context = create_app_context(base_dir)
     window = MainWindow(context)
     if not context.config.monitor.start_minimized:

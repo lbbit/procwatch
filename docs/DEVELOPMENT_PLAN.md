@@ -12,8 +12,8 @@
 ### M2 - Monitoring engine
 - [x] psutil 采样器
 - [x] Top N 进程筛选
-- [x] 低开销定时采样线程（当前为 Qt timer + 轻量采样）
-- [ ] 历史保留与清理策略
+- [x] 低开销定时采样线程（已改为后台 worker 线程）
+- [x] 历史保留与清理策略
 
 ### M3 - Desktop UI
 - [x] 主界面布局

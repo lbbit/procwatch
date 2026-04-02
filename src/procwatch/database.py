@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
-from procwatch.models import SystemSnapshot
+from procwatch.models import ProcessMetric, SystemSnapshot
 
 
 class Base(DeclarativeBase):
@@ -16,7 +18,7 @@ class SystemSample(Base):
     __tablename__ = "system_samples"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ts: Mapped[object] = mapped_column(DateTime, index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, index=True)
     cpu_percent: Mapped[float] = mapped_column(Float)
     memory_percent: Mapped[float] = mapped_column(Float)
     total_memory_mb: Mapped[int] = mapped_column(Integer)
@@ -35,6 +37,14 @@ class ProcessSample(Base):
     cpu_percent: Mapped[float] = mapped_column(Float)
     memory_mb: Mapped[float] = mapped_column(Float)
     system_sample: Mapped[SystemSample] = relationship(back_populates="process_samples")
+
+
+@dataclass(slots=True)
+class HistoryPoint:
+    sample_id: int
+    timestamp: datetime
+    cpu_percent: float
+    memory_percent: float
 
 
 class Database:
@@ -77,3 +87,54 @@ class Database:
         with Session(self.engine) as session:
             stmt = select(SystemSample).order_by(SystemSample.ts.desc()).limit(limit)
             return list(session.scalars(stmt).all())
+
+    def history_points(self, limit: int = 2000) -> list[HistoryPoint]:
+        with Session(self.engine) as session:
+            stmt = select(SystemSample).order_by(SystemSample.ts.desc()).limit(limit)
+            rows = list(session.scalars(stmt).all())
+        rows.reverse()
+        return [
+            HistoryPoint(
+                sample_id=row.id,
+                timestamp=row.ts,
+                cpu_percent=row.cpu_percent,
+                memory_percent=row.memory_percent,
+            )
+            for row in rows
+        ]
+
+    def processes_for_sample(self, sample_id: int, category: str) -> list[ProcessMetric]:
+        with Session(self.engine) as session:
+            stmt = (
+                select(ProcessSample)
+                .where(
+                    ProcessSample.system_sample_id == sample_id,
+                    ProcessSample.category == category,
+                )
+                .order_by(ProcessSample.cpu_percent.desc(), ProcessSample.memory_mb.desc())
+            )
+            rows = list(session.scalars(stmt).all())
+        return [
+            ProcessMetric(
+                pid=row.pid,
+                process_name=row.process_name,
+                cpu_percent=row.cpu_percent,
+                memory_mb=row.memory_mb,
+            )
+            for row in rows
+        ]
+
+    def purge_older_than(self, cutoff: datetime) -> None:
+        with Session(self.engine) as session:
+            old_ids = list(
+                session.scalars(select(SystemSample.id).where(SystemSample.ts < cutoff)).all()
+            )
+            if not old_ids:
+                return
+            session.query(ProcessSample).filter(ProcessSample.system_sample_id.in_(old_ids)).delete(
+                synchronize_session=False
+            )
+            session.query(SystemSample).filter(SystemSample.id.in_(old_ids)).delete(
+                synchronize_session=False
+            )
+            session.commit()
