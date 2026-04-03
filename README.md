@@ -44,6 +44,20 @@ ProcWatch 采用 **Python + PySide6 (Qt)** 方案，而不是“Python 后端 + 
 
 界面目标：**现代、深色、卡片化、信息密度高但不杂乱**。
 
+## 🖼️ Screenshots
+
+### 实时状态界面
+
+![Realtime Status](docs/images/realtime-status.jpg)
+
+### 历史查询界面
+
+![History Query](docs/images/history-query.jpg)
+
+### 设置界面
+
+![Settings Tab](docs/images/settings-tab.jpg)
+
 ## 🏗️ Current architecture
 
 ```text
